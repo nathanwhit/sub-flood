@@ -1,20 +1,35 @@
-import {Keyring} from "@polkadot/keyring";
-import {ApiPromise, WsProvider} from "@polkadot/api";
-import {KeyringPair} from "@polkadot/keyring/types";
-import { SignedBlock, BlockHash, BlockAttestations } from "@polkadot/types/interfaces";
-
+import "@polkadot/api-augment";
+import { Keyring } from "@polkadot/keyring";
+import { ApiPromise, WsProvider } from "@polkadot/api";
+import { KeyringPair } from "@polkadot/keyring/types";
+import {
+    SignedBlock,
+    BlockHash,
+    BlockAttestations,
+    AccountInfo,
+    Balance,
+} from "@polkadot/types/interfaces";
+import crypto from 'crypto';
 
 function seedFromNum(seed: number): string {
-    return '//user//' + ("0000" + seed).slice(-4);
+    return "//user//" + ("0000" + seed).slice(-4);
 }
 
-async function getBlockStats(api: ApiPromise, hash?: BlockHash | undefined): Promise<any> {
-    const signedBlock = hash ? await api.rpc.chain.getBlock(hash) : await api.rpc.chain.getBlock();
+async function getBlockStats(
+    api: ApiPromise,
+    hash?: BlockHash | undefined
+): Promise<any> {
+    const signedBlock = hash
+        ? await api.rpc.chain.getBlock(hash)
+        : await api.rpc.chain.getBlock();
 
     // the hash for each extrinsic in the block
-    let timestamp = signedBlock.block.extrinsics.find(
-        ({ method: { method, section } }) => section === 'timestamp' && method === 'set'
-    )!.method.args[0].toString();
+    let timestamp = signedBlock.block.extrinsics
+        .find(
+            ({ method: { method, section } }) =>
+                section === "timestamp" && method === "set"
+        )!
+        .method.args[0].toString();
 
     let date = new Date(+timestamp);
 
@@ -23,36 +38,44 @@ async function getBlockStats(api: ApiPromise, hash?: BlockHash | undefined): Pro
         transactions: signedBlock.block.extrinsics.length,
         parent: signedBlock.block.header.parentHash,
         blockNumber: signedBlock.block.header.number,
-    }
+    };
 }
 
 async function run() {
-    var argv = require('minimist')(process.argv.slice(2));
+    var argv = require("minimist")(process.argv.slice(2));
 
-    let TOTAL_TRANSACTIONS = argv.total_transactions ? argv.total_transactions : 25000;
-    let TPS = argv.scale ? argv.scale : 100;
-    let TOTAL_THREADS = argv.total_threads ? argv.total_threads : 10;
-    let TOTAL_BATCHES = TOTAL_TRANSACTIONS/TPS;
+    let TOTAL_TRANSACTIONS = argv.total_transactions
+        ? argv.total_transactions
+        : 100000;
+    let TPS = argv.scale ? argv.scale : 5000;
+    let TOTAL_THREADS = argv.total_threads ? argv.total_threads : 20;
+    let TOTAL_BATCHES = TOTAL_TRANSACTIONS / TPS;
     let TRANSACTION_PER_BATCH = TPS / TOTAL_THREADS;
     let WS_URL = argv.url ? argv.url : "ws://localhost:9944";
     let TOTAL_USERS = TPS;
     let USERS_PER_THREAD = TOTAL_USERS / TOTAL_THREADS;
     let TOKENS_TO_SEND = 1;
     let MEASURE_FINALISATION = argv.finalization ? argv.finalization : false;
-    let FINALISATION_TIMEOUT = argv.finalization_timeout ? argv.finalization_timeout : 20000; // 20 seconds
-    let FINALISATION_ATTEMPTS = argv.finalization_attempts ? argv.finalization_attempts : 5;
+    let FINALISATION_TIMEOUT = argv.finalization_timeout
+        ? argv.finalization_timeout
+        : 20000; // 20 seconds
+    let FINALISATION_ATTEMPTS = argv.finalization_attempts
+        ? argv.finalization_attempts
+        : 5;
 
     let provider = new WsProvider(WS_URL);
 
     let apiRequest = await Promise.race([
-        ApiPromise.create({provider}),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000))
-    ]).catch(function(err) {
+        ApiPromise.create({ provider }),
+        new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("timeout")), 3000)
+        ),
+    ]).catch(function (err) {
         throw Error(`Timeout error: ` + err.toString());
     });
     let api = apiRequest as ApiPromise;
 
-    let keyring = new Keyring({type: 'sr25519'});
+    let keyring = new Keyring({ type: "sr25519" });
 
     let nonces = [];
 
@@ -60,15 +83,19 @@ async function run() {
     for (let i = 0; i <= TOTAL_USERS; i++) {
         let stringSeed = seedFromNum(i);
         let keys = keyring.addFromUri(stringSeed);
-        let nonce = (await api.query.system.account(keys.address)).nonce.toNumber();
-        nonces.push(nonce)
+        let nonce = (await api.query.system.account<AccountInfo>(keys.address))
+            .nonce;
+        nonces.push(nonce);
     }
     console.log("All nonces fetched!");
 
     console.log("Endowing all users from Alice account...");
     let aliceKeyPair = keyring.addFromUri("//Alice");
-    let aliceNonce = (await api.query.system.account(aliceKeyPair.address)).nonce.toNumber();
-    let keyPairs = new Map<number, KeyringPair>()
+    let aliceNonce = (
+        await api.query.system.account<AccountInfo>(aliceKeyPair.address)
+    ).nonce.toNumber();
+    let keyPairs = new Map<number, KeyringPair>();
+    let addresses = new Map<number, string>();
     console.log("Alice nonce is " + aliceNonce);
 
     let finalized_transactions = 0;
@@ -78,43 +105,91 @@ async function run() {
         keyPairs.set(seed, keypair);
 
         // should be greater than existential deposit.
-        let transfer = api.tx.balances.transfer(keypair.address, 10 * api.consts.balances.existentialDeposit.toNumber());
-
-        let receiverSeed = seedFromNum(seed);
-        console.log(
-            `Alice -> ${receiverSeed} (${keypair.address})`
+        let transfer = api.tx.balances.transfer(
+            keypair.address,
+            10000000000 * (<Balance>api.consts.balances.existentialDeposit).toNumber()
         );
-        await transfer.signAndSend(aliceKeyPair, { nonce: aliceNonce }, ({ status }) => {
-            if (status.isFinalized) {
-                finalized_transactions++;
+        
+        let receiverSeed = seedFromNum(seed);
+        console.log(`Alice -> ${receiverSeed} (${keypair.address})`);
+        const unsub = await transfer.signAndSend(
+            aliceKeyPair,
+            { nonce: aliceNonce },
+            ({ status }) => {
+                if (status.isInBlock) {
+                    finalized_transactions++;
+                    unsub();
+                }
             }
-        });
+        );
         aliceNonce ++;
     }
     console.log("All users endowed from Alice account!");
+    for (let seed = 0; seed <= TOTAL_USERS; seed++) {
+        let userNonce = nonces[seed];
+        let register = api.tx.creditcoin.registerAddress(
+            "eth",
+            seed.toString(),
+            "mainnet"
+        );
+        let senderKeyPair = keyPairs.get(seed)!;
+        const unsubRegister = await register.signAndSend(
+            senderKeyPair,
+            { nonce: userNonce },
+            ({ status, events = [] }) => {
+                if (status.isInBlock) {
+                    finalized_transactions++;
+                    events.forEach(({ event: { data, section, method } }) => {
+                        if (section == "creditcoin" && method == "AddressRegistered") {
+                            addresses.set(seed, data[0].toString());
+                        }
+                    });
+                    unsubRegister();
+                }
+            }
+        );
+        nonces[seed]++;
+    }
 
     console.log("Wait for transactions finalisation");
-    await new Promise(r => setTimeout(r, FINALISATION_TIMEOUT));
+    await new Promise((r) => setTimeout(r, FINALISATION_TIMEOUT));
     console.log(`Finalized transactions ${finalized_transactions}`);
 
-    if (finalized_transactions < TOTAL_USERS + 1) {
+    if (finalized_transactions < (2*TOTAL_USERS) + 1) {
         throw Error(`Not all transactions finalized`);
     }
 
-    console.log(`Pregenerating ${TOTAL_TRANSACTIONS} transactions across ${TOTAL_THREADS} threads...`);
+    console.log(
+        `Pregenerating ${TOTAL_TRANSACTIONS} transactions across ${TOTAL_THREADS} threads...`
+    );
     var thread_payloads: any[][][] = [];
     var sanityCounter = 0;
     for (let thread = 0; thread < TOTAL_THREADS; thread++) {
         let batches = [];
-        for (var batchNo = 0; batchNo < TOTAL_BATCHES; batchNo ++) {
+        for (var batchNo = 0; batchNo < TOTAL_BATCHES; batchNo++) {
             let batch = [];
-            for (var userNo = thread * USERS_PER_THREAD; userNo < (thread+1) * USERS_PER_THREAD; userNo++) {
+            for (
+                var userNo = thread * USERS_PER_THREAD;
+                userNo < (thread + 1) * USERS_PER_THREAD;
+                userNo++
+            ) {
                 let nonce = nonces[userNo];
-                nonces[userNo] ++;
+                nonces[userNo]++;
                 let senderKeyPair = keyPairs.get(userNo)!;
+                let addressId = addresses.get(userNo);
 
-                let transfer = api.tx.balances.transfer(aliceKeyPair.address, TOKENS_TO_SEND);
-                let signedTransaction = transfer.sign(senderKeyPair, {nonce});
+                var guid = crypto.randomBytes(16);
+
+                let transfer = api.tx.creditcoin.addAskOrder(
+                    addressId,
+                    0,
+                    0,
+                    0,
+                    0,
+                    10000000,
+                    nonce
+                );
+                let signedTransaction = await transfer.signAsync(senderKeyPair, { nonce });
 
                 batch.push(signedTransaction);
 
@@ -128,15 +203,18 @@ async function run() {
 
     let nextTime = new Date().getTime();
     let initialTime = new Date();
-    const finalisationTime = new Uint32Array(new SharedArrayBuffer(Uint32Array.BYTES_PER_ELEMENT));
+    const finalisationTime = new Uint32Array(
+        new SharedArrayBuffer(Uint32Array.BYTES_PER_ELEMENT)
+    );
     finalisationTime[0] = 0;
-    const finalisedTxs = new Uint16Array(new SharedArrayBuffer(Uint16Array.BYTES_PER_ELEMENT));
+    const finalisedTxs = new Uint16Array(
+        new SharedArrayBuffer(Uint16Array.BYTES_PER_ELEMENT)
+    );
     finalisedTxs[0] = 0;
 
     for (var batchNo = 0; batchNo < TOTAL_BATCHES; batchNo++) {
-
         while (new Date().getTime() < nextTime) {
-            await new Promise(r => setTimeout(r, 5));
+            await new Promise((r) => setTimeout(r, 5));
         }
 
         nextTime = nextTime + 1000;
@@ -146,22 +224,38 @@ async function run() {
         console.log(`Starting batch #${batchNo}`);
         let batchPromises = new Array<Promise<number>>();
         for (let threadNo = 0; threadNo < TOTAL_THREADS; threadNo++) {
-            for (let transactionNo = 0; transactionNo < TRANSACTION_PER_BATCH; transactionNo++) {
+            for (
+                let transactionNo = 0;
+                transactionNo < TRANSACTION_PER_BATCH;
+                transactionNo++
+            ) {
                 batchPromises.push(
-                    new Promise<number>(async resolve => {
+                    new Promise<number>(async (resolve) => {
                         let transaction = thread_payloads[threadNo][batchNo][transactionNo];
-                        resolve(await transaction.send(({ status }) => {
-                            if (status.isFinalized) {
-                                Atomics.add(finalisedTxs, 0, 1);
-                                let finalisationTimeCurrent = new Date().getTime() - initialTime.getTime();
-                                if (finalisationTimeCurrent > Atomics.load(finalisationTime, 0)) {
-                                    Atomics.store(finalisationTime, 0, finalisationTimeCurrent);
-                                }
-                            }
-                        }).catch((err: any) => {
-                            errors.push(err);
-                            return -1;
-                        }));
+                        resolve(
+                            await transaction
+                                .send(({ status }) => {
+                                    if (status.isInBlock) {
+                                        Atomics.add(finalisedTxs, 0, 1);
+                                        let finalisationTimeCurrent =
+                                            new Date().getTime() - initialTime.getTime();
+                                        if (
+                                            finalisationTimeCurrent >
+                                            Atomics.load(finalisationTime, 0)
+                                        ) {
+                                            Atomics.store(
+                                                finalisationTime,
+                                                0,
+                                                finalisationTimeCurrent
+                                            );
+                                        }
+                                    }
+                                })
+                                .catch((err: any) => {
+                                    errors.push(err);
+                                    return -1;
+                                })
+                        );
                     })
                 );
             }
@@ -169,7 +263,9 @@ async function run() {
         await Promise.all(batchPromises);
 
         if (errors.length > 0) {
-            console.log(`${errors.length}/${TRANSACTION_PER_BATCH} errors sending transactions`);
+            console.log(
+                `${errors.length}/${TRANSACTION_PER_BATCH} errors sending transactions`
+            );
         }
     }
 
@@ -182,19 +278,21 @@ async function run() {
     console.log(`latest block: ${latest_block.date}`);
     console.log(`initial time: ${initialTime}`);
     let prunedFlag = false;
-    for (; latest_block.date > initialTime; ) {
+    for (; latest_block.date > initialTime;) {
         try {
             latest_block = await getBlockStats(api, latest_block.parent);
-        } catch(err) {
+        } catch (err) {
             console.log("Cannot retrieve block info with error: " + err.toString());
             console.log("Most probably the state is pruned already, stopping");
             prunedFlag = true;
             break;
         }
         if (latest_block.date < finalTime) {
-            console.log(`block number ${latest_block.blockNumber}: ${latest_block.transactions} transactions`);
+            console.log(
+                `block number ${latest_block.blockNumber}: ${latest_block.transactions} transactions`
+            );
             total_transactions += latest_block.transactions;
-            total_blocks ++;
+            total_blocks++;
         }
     }
 
@@ -206,8 +304,10 @@ async function run() {
         let break_condition = false;
         let attempt = 0;
         while (!break_condition) {
-            console.log(`Wait ${FINALISATION_TIMEOUT} ms for transactions finalisation, attempt ${attempt} out of ${FINALISATION_ATTEMPTS}`);
-            await new Promise(r => setTimeout(r, FINALISATION_TIMEOUT));
+            console.log(
+                `Wait ${FINALISATION_TIMEOUT} ms for transactions finalisation, attempt ${attempt} out of ${FINALISATION_ATTEMPTS}`
+            );
+            await new Promise((r) => setTimeout(r, FINALISATION_TIMEOUT));
 
             if (Atomics.load(finalisedTxs, 0) < TOTAL_TRANSACTIONS) {
                 if (attempt == FINALISATION_ATTEMPTS) {
@@ -220,14 +320,24 @@ async function run() {
                 break_condition = true;
             }
         }
-        console.log(`Finalized ${Atomics.load(finalisedTxs, 0)} out of ${TOTAL_TRANSACTIONS} transactions, finalization time was ${Atomics.load(finalisationTime, 0)}`);
+        console.log(
+            `Finalized ${Atomics.load(
+                finalisedTxs,
+                0
+            )} out of ${TOTAL_TRANSACTIONS} transactions, finalization time was ${Atomics.load(
+                finalisationTime,
+                0
+            )}`
+        );
     }
 }
 
-run().then(function() {
-    console.log("Done");
-    process.exit(0);
-}).catch(function(err) {
-    console.log("Error: " + err.toString());
-    process.exit(1);
-});
+run()
+    .then(function () {
+        console.log("Done");
+        process.exit(0);
+    })
+    .catch(function (err) {
+        console.log("Error: " + err.toString());
+        process.exit(1);
+    });
